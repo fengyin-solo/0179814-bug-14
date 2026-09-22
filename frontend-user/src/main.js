@@ -19,6 +19,11 @@ class App {
     this.currentAnalysisResult = null;
     this.currentFileName = '';
     this.selectedRecordId = null;
+    // 分析任务状态：同一时间只允许一个分析任务，全部保存在内存中，
+    // 刷新页面后自然回到可操作的初始状态
+    this.isAnalyzing = false;
+    this.analysisAbortController = null;
+    this.analysisSeq = 0;
   }
 
   async init() {
@@ -99,6 +104,9 @@ class App {
       return;
     }
 
+    // 换文件前先中止正在进行的分析，避免旧任务继续运行并覆盖新状态
+    this.abortOngoingAnalysis();
+
     this.currentFileName = file.name;
     logger.info('开始加载音频文件', { name: file.name, size: file.size });
 
@@ -147,6 +155,9 @@ class App {
   }
 
   removeAudioFile() {
+    // 移除文件前先中止正在进行的分析，避免旧任务完成后把界面写回中间状态
+    this.abortOngoingAnalysis();
+
     this.audioBuffer = null;
     this.currentAnalysisResult = null;
     this.currentFileName = '';
@@ -239,6 +250,12 @@ class App {
   }
 
   async analyzeAudio() {
+    // 重复提交时只保留一次分析：已有任务在运行则直接忽略
+    if (this.isAnalyzing) {
+      logger.warn('分析进行中，忽略重复提交');
+      return;
+    }
+
     if (!this.audioBuffer) {
       alert('请先上传音频文件');
       return;
@@ -254,9 +271,16 @@ class App {
 
     logger.info('开始分析音频', { startMs, endMs });
 
-    try {
-      this.uiController.showLoading('正在分析音频...');
+    // 本次任务的序号与取消控制器，序号用于识别过期任务
+    const analysisId = ++this.analysisSeq;
+    this.isAnalyzing = true;
+    this.analysisAbortController = new AbortController();
 
+    // 进入分析状态：按钮禁用、显示加载提示与进度条
+    this.uiController.setAnalyzeButtonBusy(true);
+    this.uiController.showAnalysisLoading('正在分析音频...', () => this.cancelAnalysis());
+
+    try {
       // 获取 FFT 大小
       const fftSize = parseInt(document.getElementById('fftSize').value);
 
@@ -266,12 +290,31 @@ class App {
       const channelData = this.audioBuffer.getChannelData(0);
       const selectedData = channelData.slice(startSample, endSample);
 
-      // 分析音频
-      const analysisResult = await this.audioAnalyzer.analyze(selectedData, this.audioBuffer.sampleRate, fftSize);
+      // 分析音频，进度回调驱动加载提示与两处进度条
+      const analysisResult = await this.audioAnalyzer.analyze(
+        selectedData,
+        this.audioBuffer.sampleRate,
+        fftSize,
+        {
+          signal: this.analysisAbortController.signal,
+          onProgress: (percent, stage) => {
+            // 过期任务的进度不再写界面
+            if (analysisId === this.analysisSeq) {
+              this.uiController.updateAnalysisProgress(percent, stage);
+            }
+          }
+        }
+      );
 
-      logger.info('音频分析完成', { 
+      // 任务已过期（例如分析期间移除了文件），结果直接丢弃
+      if (analysisId !== this.analysisSeq) {
+        logger.warn('分析任务已过期，丢弃结果', { analysisId });
+        return;
+      }
+
+      logger.info('音频分析完成', {
         fundamentalFreq: analysisResult.fundamentalFreq,
-        harmonicsCount: analysisResult.harmonics.length 
+        harmonicsCount: analysisResult.harmonics.length
       });
 
       // 保存当前分析结果
@@ -293,11 +336,53 @@ class App {
       document.getElementById('recordNote').value = '';
 
     } catch (error) {
-      logger.error('音频分析失败', error);
-      alert('音频分析失败: ' + error.message);
+      if (error.name === 'AbortError') {
+        logger.info('分析已取消', { analysisId });
+        if (analysisId === this.analysisSeq) {
+          this.uiController.showToast('分析已取消', 'info');
+        }
+      } else {
+        logger.error('音频分析失败', error);
+        alert('音频分析失败: ' + error.message);
+      }
     } finally {
-      this.uiController.hideLoading();
+      // 无论成功、失败还是取消，都复位界面；过期任务不接管界面状态
+      if (analysisId === this.analysisSeq) {
+        this.isAnalyzing = false;
+        this.analysisAbortController = null;
+        this.uiController.hideAnalysisLoading();
+        this.uiController.setAnalyzeButtonBusy(false, !!this.audioBuffer);
+      }
     }
+  }
+
+  /**
+   * 取消当前正在进行的分析（由加载遮罩上的取消按钮触发）
+   */
+  cancelAnalysis() {
+    if (this.isAnalyzing && this.analysisAbortController) {
+      logger.info('用户取消分析');
+      this.analysisAbortController.abort();
+    }
+  }
+
+  /**
+   * 中止正在进行的分析并立即复位界面
+   * 用于上传新文件、移除文件等场景，保证旧任务不会把界面卡在中间状态
+   */
+  abortOngoingAnalysis() {
+    if (!this.isAnalyzing) return;
+
+    // 递增序号使旧任务的进度回调与 finally 复位失效，界面状态由这里接管
+    this.analysisSeq++;
+    if (this.analysisAbortController) {
+      this.analysisAbortController.abort();
+      this.analysisAbortController = null;
+    }
+    this.isAnalyzing = false;
+    this.uiController.hideAnalysisLoading();
+    this.uiController.setAnalyzeButtonBusy(false, !!this.audioBuffer);
+    logger.info('已中止正在进行的分析');
   }
 
   updateFundamentalInfo(result) {

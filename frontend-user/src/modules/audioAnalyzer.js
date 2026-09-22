@@ -15,22 +15,34 @@ export class AudioAnalyzer {
    * @param {Float32Array} audioData - 音频采样数据
    * @param {number} sampleRate - 采样率
    * @param {number} fftSize - FFT 大小
+   * @param {Object} options - 可选配置
+   * @param {Function} options.onProgress - 进度回调 (percent: 0-100, stage: 阶段描述)
+   * @param {AbortSignal} options.signal - 取消信号，触发后抛出 AbortError
    * @returns {Object} 分析结果
    */
-  async analyze(audioData, sampleRate, fftSize = 8192) {
+  async analyze(audioData, sampleRate, fftSize = 8192, { onProgress = null, signal = null } = {}) {
     logger.info('开始频谱分析', { dataLength: audioData.length, sampleRate, fftSize });
+
+    const report = (percent, stage) => {
+      if (onProgress) onProgress(percent, stage);
+    };
+
+    report(5, '正在准备分析数据...');
+    await this.yieldControl(signal);
 
     // 执行 FFT 分析
     const frequencyData = this.performFFT(audioData, fftSize);
-    
+    report(20, '正在检测基频...');
+    await this.yieldControl(signal);
+
     // 计算频率分辨率
     const frequencyResolution = sampleRate / fftSize;
-    
+
     // 生成频率数组
     const frequencies = [];
     const magnitudes = [];
     const binCount = fftSize / 2;
-    
+
     for (let i = 0; i < binCount; i++) {
       const freq = i * frequencyResolution;
       if (freq > 20 && freq < 20000) { // 人耳可听范围
@@ -39,24 +51,39 @@ export class AudioAnalyzer {
       }
     }
 
-    // 检测基频
-    const fundamentalFreq = this.detectFundamentalFrequency(audioData, sampleRate, frequencies, magnitudes);
-    
+    // 检测基频（自相关法耗时较长，内部会持续上报进度）
+    const fundamentalFreq = await this.detectFundamentalFrequency(
+      audioData, sampleRate, frequencies, magnitudes,
+      (p) => report(20 + p * 35, '正在检测基频...'),
+      signal
+    );
+
     // 计算倍频 (最大13倍)
+    report(58, '正在计算倍频...');
+    await this.yieldControl(signal);
     const harmonics = this.calculateHarmonics(fundamentalFreq, 13);
-    
+
     // 过滤只保留基频和倍频附近的数据
     const filteredData = this.filterHarmonics(frequencies, magnitudes, fundamentalFreq, harmonics);
-    
+
     // 计算频率区域数据
+    report(68, '正在分析频率区域...');
+    await this.yieldControl(signal);
     const frequencyBands = this.calculateFrequencyBands(fundamentalFreq, harmonics, filteredData);
-    
-    // 计算声强随时间变化的热力图数据
-    const heatmapData = this.calculateHeatmapData(audioData, sampleRate, fftSize, fundamentalFreq, harmonics);
+
+    // 计算声强随时间变化的热力图数据（逐帧 FFT，内部持续上报进度）
+    const heatmapData = await this.calculateHeatmapData(
+      audioData, sampleRate, fftSize, fundamentalFreq, harmonics,
+      (p) => report(70 + p * 28, '正在生成热力图...'),
+      signal
+    );
 
     // 找出频率范围
     const minFreq = fundamentalFreq * 0.8;
     const maxFreq = Math.min(fundamentalFreq * 13.5, 20000);
+
+    this.throwIfAborted(signal);
+    report(100, '分析完成');
 
     return {
       fundamentalFreq,
@@ -70,6 +97,27 @@ export class AudioAnalyzer {
       rawFrequencies: frequencies,
       rawMagnitudes: magnitudes
     };
+  }
+
+  /**
+   * 检查取消信号，已取消则抛出 AbortError
+   */
+  throwIfAborted(signal) {
+    if (signal && signal.aborted) {
+      const error = new Error('分析已取消');
+      error.name = 'AbortError';
+      throw error;
+    }
+  }
+
+  /**
+   * 让出主线程，使界面有机会刷新（进度条、加载提示）
+   * 使用 setTimeout 而非 requestAnimationFrame，切到后台标签页时分析仍能继续
+   */
+  async yieldControl(signal) {
+    this.throwIfAborted(signal);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    this.throwIfAborted(signal);
   }
 
   /**
@@ -151,9 +199,9 @@ export class AudioAnalyzer {
   /**
    * 检测基频 - 使用自相关法和峰值检测
    */
-  detectFundamentalFrequency(audioData, sampleRate, frequencies, magnitudes) {
+  async detectFundamentalFrequency(audioData, sampleRate, frequencies, magnitudes, onProgress = null, signal = null) {
     // 方法1: 自相关法
-    const autocorrFreq = this.autocorrelation(audioData, sampleRate);
+    const autocorrFreq = await this.autocorrelation(audioData, sampleRate, onProgress, signal);
     
     // 方法2: 峰值检测法
     const peakFreq = this.findDominantPeak(frequencies, magnitudes);
@@ -177,31 +225,40 @@ export class AudioAnalyzer {
   /**
    * 自相关法检测基频
    */
-  autocorrelation(audioData, sampleRate) {
+  async autocorrelation(audioData, sampleRate, onProgress = null, signal = null) {
     const minPeriod = Math.floor(sampleRate / 2000); // 最高频率 2000Hz
     const maxPeriod = Math.floor(sampleRate / 50);   // 最低频率 50Hz
     const dataLength = Math.min(audioData.length, sampleRate); // 最多分析1秒
-    
+
     let maxCorr = 0;
     let bestPeriod = minPeriod;
-    
+    let iterations = 0;
+
     for (let period = minPeriod; period < maxPeriod && period < dataLength / 2; period++) {
       let corr = 0;
       let count = 0;
-      
+
       for (let i = 0; i < dataLength - period; i++) {
         corr += audioData[i] * audioData[i + period];
         count++;
       }
-      
+
       corr /= count;
-      
+
       if (corr > maxCorr) {
         maxCorr = corr;
         bestPeriod = period;
       }
+
+      // 定期让出主线程并上报进度，避免长时间阻塞界面
+      if (++iterations % 64 === 0) {
+        if (onProgress) {
+          onProgress(Math.min(1, (period - minPeriod) / Math.max(1, maxPeriod - minPeriod)));
+        }
+        await this.yieldControl(signal);
+      }
     }
-    
+
     return sampleRate / bestPeriod;
   }
 
@@ -348,31 +405,35 @@ export class AudioAnalyzer {
   /**
    * 计算热力图数据 - 声强随时间变化
    */
-  calculateHeatmapData(audioData, sampleRate, fftSize, fundamentalFreq, harmonics) {
+  async calculateHeatmapData(audioData, sampleRate, fftSize, fundamentalFreq, harmonics, onProgress = null, signal = null) {
     const allHarmonics = [fundamentalFreq, ...harmonics];
     const windowSize = Math.min(fftSize, 2048);
     const hopSize = windowSize / 4;
     const numFrames = Math.floor((audioData.length - windowSize) / hopSize) + 1;
-    
+
     // 限制帧数以提高性能
     const maxFrames = 100;
     const frameStep = Math.max(1, Math.floor(numFrames / maxFrames));
     const actualFrames = Math.ceil(numFrames / frameStep);
-    
+
     const heatmapData = [];
     const timeLabels = [];
     const freqLabels = allHarmonics.map((h, i) => i === 0 ? '基频' : `${i + 1}倍频`);
-    
+
+    let processedFrames = 0;
     for (let frame = 0; frame < numFrames; frame += frameStep) {
+      // 每帧都检查取消信号，保证中途取消能及时生效
+      this.throwIfAborted(signal);
+
       const startSample = frame * hopSize;
       const endSample = startSample + windowSize;
-      
+
       if (endSample > audioData.length) break;
-      
+
       const frameData = audioData.slice(startSample, endSample);
       const fftResult = this.performFFT(frameData, windowSize);
       const freqResolution = sampleRate / windowSize;
-      
+
       // 提取每个谐波的能量
       const frameEnergies = allHarmonics.map(harmonic => {
         const binIndex = Math.round(harmonic / freqResolution);
@@ -381,9 +442,19 @@ export class AudioAnalyzer {
         }
         return 0;
       });
-      
+
       heatmapData.push(frameEnergies);
       timeLabels.push((startSample / sampleRate * 1000).toFixed(0));
+
+      processedFrames++;
+      if (onProgress) {
+        onProgress(Math.min(1, processedFrames / Math.max(1, actualFrames)));
+      }
+
+      // 每处理几帧让出一次主线程，保持进度条和界面刷新
+      if (processedFrames % 4 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     }
     
     // 归一化

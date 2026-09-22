@@ -657,6 +657,78 @@ body {
   }
 }
 
+/* 加载遮罩进度条 */
+.loading-progress {
+  width: 260px;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-top: 16px;
+}
+
+.loading-progress-bar {
+  width: 0%;
+  height: 100%;
+  background: #FFF;
+  border-radius: var(--radius-sm);
+  transition: width 0.15s ease;
+}
+
+.loading-progress-text {
+  margin-top: 8px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.btn-cancel-loading {
+  margin-top: 20px;
+  padding: 8px 24px;
+  background: transparent;
+  color: #FFF;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-cancel-loading:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: #FFF;
+}
+
+/* 面板内联分析进度（与加载遮罩中的进度同步） */
+.analysis-progress {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.analysis-progress-track {
+  flex: 1;
+  height: 8px;
+  background: #F0E6D8;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.analysis-progress-bar {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(135deg, var(--primary-color), var(--primary-light));
+  border-radius: var(--radius-sm);
+  transition: width 0.15s ease;
+}
+
+.analysis-progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 38px;
+  text-align: right;
+}
+
 /* 保存记录表单 */
 .save-record-form {
   display: flex;

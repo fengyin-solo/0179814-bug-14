@@ -8,21 +8,98 @@ const logger = new Logger('UIController');
 export class UIController {
   constructor() {
     this.loadingOverlay = document.getElementById('loadingOverlay');
+    this.loadingText = document.getElementById('loadingMessage');
+    this.loadingProgress = document.getElementById('loadingProgress');
+    this.loadingProgressBar = document.getElementById('loadingProgressBar');
+    this.loadingProgressText = document.getElementById('loadingProgressText');
+    this.cancelLoadingBtn = document.getElementById('cancelLoadingBtn');
+    this.analysisProgress = document.getElementById('analysisProgress');
+    this.onCancelLoading = null;
+
+    if (this.cancelLoadingBtn) {
+      this.cancelLoadingBtn.addEventListener('click', () => {
+        if (this.onCancelLoading) {
+          this.onCancelLoading();
+        }
+      });
+    }
   }
 
   /**
-   * 显示加载状态
+   * 显示加载状态（纯提示，无进度条和取消按钮）
    * @param {string} message - 加载提示信息
    */
   showLoading(message = '加载中...') {
     if (this.loadingOverlay) {
-      const textElement = this.loadingOverlay.querySelector('p');
-      if (textElement) {
-        textElement.textContent = message;
+      if (this.loadingText) {
+        this.loadingText.textContent = message;
       }
+      if (this.loadingProgress) {
+        this.loadingProgress.style.display = 'none';
+      }
+      if (this.loadingProgressText) {
+        this.loadingProgressText.style.display = 'none';
+      }
+      if (this.cancelLoadingBtn) {
+        this.cancelLoadingBtn.style.display = 'none';
+      }
+      this.onCancelLoading = null;
       this.loadingOverlay.style.display = 'flex';
     }
     logger.info('显示加载状态', { message });
+  }
+
+  /**
+   * 显示分析加载状态（带进度条和取消按钮）
+   * @param {string} message - 加载提示信息
+   * @param {Function} onCancel - 点击取消按钮时的回调
+   */
+  showAnalysisLoading(message = '正在分析音频...', onCancel = null) {
+    this.showLoading(message);
+    if (this.loadingProgress) {
+      this.loadingProgress.style.display = 'block';
+    }
+    if (this.loadingProgressText) {
+      this.loadingProgressText.style.display = 'block';
+    }
+    if (this.cancelLoadingBtn) {
+      this.cancelLoadingBtn.style.display = 'inline-block';
+      this.cancelLoadingBtn.disabled = false;
+    }
+    this.onCancelLoading = onCancel;
+    if (this.analysisProgress) {
+      this.analysisProgress.style.display = 'flex';
+    }
+    this.updateAnalysisProgress(0, message);
+    logger.info('显示分析加载状态', { message });
+  }
+
+  /**
+   * 更新分析进度，遮罩层与面板内联进度由同一份数据驱动，保持两处同步
+   * @param {number} percent - 进度值 (0-100)
+   * @param {string} message - 可选的阶段提示信息
+   */
+  updateAnalysisProgress(percent, message = null) {
+    const clamped = Math.min(100, Math.max(0, Math.round(percent)));
+
+    if (this.loadingProgressBar) {
+      this.loadingProgressBar.style.width = `${clamped}%`;
+    }
+    if (this.loadingProgressText) {
+      this.loadingProgressText.textContent = `${clamped}%`;
+    }
+    if (message && this.loadingText) {
+      this.loadingText.textContent = message;
+    }
+
+    const inlineBar = document.getElementById('analysisProgressBar');
+    const inlineText = document.getElementById('analysisProgressText');
+    if (inlineBar) {
+      inlineBar.style.width = `${clamped}%`;
+    }
+    if (inlineText) {
+      inlineText.textContent = `${clamped}%`;
+    }
   }
 
   /**
@@ -32,7 +109,34 @@ export class UIController {
     if (this.loadingOverlay) {
       this.loadingOverlay.style.display = 'none';
     }
+    this.onCancelLoading = null;
     logger.info('隐藏加载状态');
+  }
+
+  /**
+   * 结束分析加载状态，并复位所有进度显示，避免残留中间状态
+   */
+  hideAnalysisLoading() {
+    this.hideLoading();
+    this.updateAnalysisProgress(0);
+    if (this.analysisProgress) {
+      this.analysisProgress.style.display = 'none';
+    }
+  }
+
+  /**
+   * 设置分析按钮的忙碌/空闲状态
+   * @param {boolean} isBusy - 是否正在分析
+   * @param {boolean} canAnalyze - 空闲时是否允许分析（是否已加载音频）
+   */
+  setAnalyzeButtonBusy(isBusy, canAnalyze = true) {
+    const button = document.getElementById('analyzeBtn');
+    if (!button) return;
+
+    button.disabled = isBusy || !canAnalyze;
+    button.innerHTML = isBusy
+      ? '<span class="btn-icon">⏳</span> 分析中...'
+      : '<span class="btn-icon">📊</span> 分析音频';
   }
 
   /**

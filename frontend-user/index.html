@@ -96,6 +96,12 @@
             <span class="btn-icon">📊</span>
             分析音频
           </button>
+          <div class="analysis-progress" id="analysisProgress" style="display: none;">
+            <div class="analysis-progress-track">
+              <div class="analysis-progress-bar" id="analysisProgressBar"></div>
+            </div>
+            <span class="analysis-progress-text" id="analysisProgressText">0%</span>
+          </div>
         </section>
 
         <section class="panel-section" id="fundamentalInfo" style="display: none;">
@@ -231,7 +237,12 @@
 
   <div class="loading-overlay" id="loadingOverlay" style="display: none;">
     <div class="loading-spinner"></div>
-    <p>正在分析音频...</p>
+    <p id="loadingMessage">正在分析音频...</p>
+    <div class="loading-progress" id="loadingProgress" style="display: none;">
+      <div class="loading-progress-bar" id="loadingProgressBar"></div>
+    </div>
+    <span class="loading-progress-text" id="loadingProgressText" style="display: none;">0%</span>
+    <button class="btn-cancel-loading" id="cancelLoadingBtn" style="display: none;">取消分析</button>
   </div>
 
   <div class="modal-overlay" id="recordDetailModal" style="display: none;">
