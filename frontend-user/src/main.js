@@ -2,6 +2,7 @@ import { AudioAnalyzer } from './modules/audioAnalyzer.js';
 import { ChartManager } from './modules/chartManager.js';
 import { UIController } from './modules/uiController.js';
 import { RecordManager } from './modules/recordManager.js';
+import { AnalysisManager } from './modules/analysisManager.js';
 import { Logger } from './utils/logger.js';
 
 // 初始化日志
@@ -14,6 +15,7 @@ class App {
     this.chartManager = null;
     this.uiController = null;
     this.recordManager = null;
+    this.analysisManager = null;
     this.audioBuffer = null;
     this.audioContext = null;
     this.currentAnalysisResult = null;
@@ -27,15 +29,33 @@ class App {
     try {
       // 初始化 AudioContext
       this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      
+
       // 初始化模块
       this.audioAnalyzer = new AudioAnalyzer(this.audioContext);
       this.chartManager = new ChartManager();
       this.uiController = new UIController();
       this.recordManager = new RecordManager();
+      // 分析任务必须先于事件绑定初始化：刷新 / 切回页面时立即对账持久化状态
+      this.analysisManager = new AnalysisManager();
+
+      // 分析状态变化时同步全部 UI（加载提示、整体进度条、两个入口的按钮与进度）
+      this.analysisManager.subscribe((state) => {
+        this.uiController.syncAnalysisState(state, this.analysisManager.isOwnedByCurrentTab());
+      });
+      // 先推一次当前状态（刷新后残留的运行任务会被重置为可操作的空闲状态）
+      this.uiController.syncAnalysisState(
+        this.analysisManager.getState(),
+        this.analysisManager.isOwnedByCurrentTab()
+      );
 
       // 绑定事件
       this.bindEvents();
+
+      // 切到其他面板 / 标签页再回来时，与持久化状态重新对账
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') this.analysisManager.resync();
+      });
+      window.addEventListener('focus', () => this.analysisManager.resync());
 
       // 加载历史记录列表
       this.updateRecordsList();
@@ -84,9 +104,18 @@ class App {
     // 范围滑块拖拽
     this.initRangeSlider();
 
-    // 分析按钮
+    // 分析按钮（左侧面板入口）
     const analyzeBtn = document.getElementById('analyzeBtn');
     analyzeBtn.addEventListener('click', () => this.analyzeAudio());
+
+    // 分析按钮（右侧空状态入口）——两个入口提交到同一个任务管理器
+    const analyzeBtnEmpty = document.getElementById('analyzeBtnEmpty');
+    analyzeBtnEmpty.addEventListener('click', () => this.analyzeAudio());
+
+    // 取消分析
+    document.getElementById('cancelAnalysisBtn').addEventListener('click', () => {
+      this.analysisManager.cancel();
+    });
 
     // 记录相关事件
     this.bindRecordEvents();
@@ -134,8 +163,8 @@ class App {
 
       this.updateRangeSlider();
 
-      // 启用分析按钮
-      document.getElementById('analyzeBtn').disabled = false;
+      // 启用两个分析入口（运行中仍由分析状态机保持禁用）
+      this.setAnalyzeButtonsEnabled(true);
 
       logger.info('音频文件加载成功', { duration, sampleRate: this.audioBuffer.sampleRate });
     } catch (error) {
@@ -146,7 +175,17 @@ class App {
     }
   }
 
-  removeAudioFile() {
+  /**
+   * 统一切换两个分析入口的可用状态
+   */
+  setAnalyzeButtonsEnabled(enabled) {
+    this.uiController.setAnalyzeAvailable(enabled);
+  }
+
+  async removeAudioFile() {
+    // 先取消仍在进行的分析，避免任务结束后更新已被移除的文件对应的图表
+    this.analysisManager.reset();
+
     this.audioBuffer = null;
     this.currentAnalysisResult = null;
     this.currentFileName = '';
@@ -154,12 +193,12 @@ class App {
     document.getElementById('fileInfo').style.display = 'none';
     document.getElementById('uploadArea').style.display = 'block';
     document.getElementById('audioPlayerSection').style.display = 'none';
-    document.getElementById('analyzeBtn').disabled = true;
+    this.setAnalyzeButtonsEnabled(false);
     document.getElementById('chartContainer').style.display = 'none';
     document.getElementById('emptyState').style.display = 'flex';
     document.getElementById('fundamentalInfo').style.display = 'none';
     document.getElementById('saveRecordSection').style.display = 'none';
-    
+
     // 清除图表
     this.chartManager.clearAllCharts();
 
@@ -239,6 +278,12 @@ class App {
   }
 
   async analyzeAudio() {
+    // 重复提交（无论来自哪个入口、本标签还是其他标签页在跑）一律忽略，只保留一次分析
+    if (this.analysisManager.isRunning()) {
+      logger.info('分析任务已在进行中，忽略重复提交');
+      return;
+    }
+
     if (!this.audioBuffer) {
       alert('请先上传音频文件');
       return;
@@ -252,26 +297,38 @@ class App {
       return;
     }
 
+    const fftSize = parseInt(document.getElementById('fftSize').value);
+
     logger.info('开始分析音频', { startMs, endMs });
 
-    try {
-      this.uiController.showLoading('正在分析音频...');
+    // 提交到统一的分析任务管理器：遮罩、整体进度条、按钮状态全部由它驱动
+    const outcome = await this.analysisManager.run(
+      { fileName: this.currentFileName, startMs, endMs, fftSize },
+      async (onProgress, signal) => {
+        // 提取选定区间的音频数据
+        const startSample = Math.floor((startMs / 1000) * this.audioBuffer.sampleRate);
+        const endSample = Math.floor((endMs / 1000) * this.audioBuffer.sampleRate);
+        const channelData = this.audioBuffer.getChannelData(0);
+        const selectedData = channelData.slice(startSample, endSample);
 
-      // 获取 FFT 大小
-      const fftSize = parseInt(document.getElementById('fftSize').value);
+        // 分析音频（带进度与取消支持）
+        const analysisResult = await this.audioAnalyzer.analyze(
+          selectedData, this.audioBuffer.sampleRate, fftSize, onProgress, signal
+        );
 
-      // 提取选定区间的音频数据
-      const startSample = Math.floor((startMs / 1000) * this.audioBuffer.sampleRate);
-      const endSample = Math.floor((endMs / 1000) * this.audioBuffer.sampleRate);
-      const channelData = this.audioBuffer.getChannelData(0);
-      const selectedData = channelData.slice(startSample, endSample);
+        return { analysisResult, selectedData };
+      }
+    );
 
-      // 分析音频
-      const analysisResult = await this.audioAnalyzer.analyze(selectedData, this.audioBuffer.sampleRate, fftSize);
+    // 重复提交被任务管理器忽略，不做任何收尾
+    if (outcome.status === 'running') return;
 
-      logger.info('音频分析完成', { 
+    if (outcome.status === 'done') {
+      const { analysisResult, selectedData } = outcome.result;
+
+      logger.info('音频分析完成', {
         fundamentalFreq: analysisResult.fundamentalFreq,
-        harmonicsCount: analysisResult.harmonics.length 
+        harmonicsCount: analysisResult.harmonics.length
       });
 
       // 保存当前分析结果
@@ -291,13 +348,10 @@ class App {
       document.getElementById('saveRecordSection').style.display = 'block';
       document.getElementById('recordName').value = `${this.currentFileName} - ${this.recordManager.formatTimestamp()}`;
       document.getElementById('recordNote').value = '';
-
-    } catch (error) {
-      logger.error('音频分析失败', error);
-      alert('音频分析失败: ' + error.message);
-    } finally {
-      this.uiController.hideLoading();
+    } else if (outcome.status === 'error') {
+      this.uiController.showToast('音频分析失败: ' + (outcome.error?.message || ''), 'error');
     }
+    // 取消与重复提交：不改动已有图表，遮罩/进度/按钮由状态机自动复位
   }
 
   updateFundamentalInfo(result) {

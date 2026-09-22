@@ -1,4 +1,5 @@
 import { Logger } from '../utils/logger.js';
+import { ANALYSIS_STATUS } from './analysisManager.js';
 
 const logger = new Logger('UIController');
 
@@ -8,31 +9,163 @@ const logger = new Logger('UIController');
 export class UIController {
   constructor() {
     this.loadingOverlay = document.getElementById('loadingOverlay');
+    this.loadingText = this.loadingOverlay?.querySelector('p') || null;
+    this.loadingProgress = document.getElementById('loadingProgress');
+    this.loadingProgressFill = document.getElementById('loadingProgressFill');
+    this.loadingProgressText = document.getElementById('loadingProgressText');
+    this.cancelAnalysisBtn = document.getElementById('cancelAnalysisBtn');
+    // true 表示当前遮罩服务于分析流程（受分析状态机控制）
+    this.overlayInAnalysisMode = false;
+
+    // 两个分析入口共享的元素引用
+    this.analyzeButtons = [
+      document.getElementById('analyzeBtn'),
+      document.getElementById('analyzeBtnEmpty')
+    ].filter(Boolean);
+
+    this.analysisProgressBars = [
+      document.getElementById('analyzeProgressFill'),
+      document.getElementById('analyzeProgressFillEmpty')
+    ].filter(Boolean);
+
+    this.analysisProgressTexts = [
+      document.getElementById('analyzeProgressText'),
+      document.getElementById('analyzeProgressTextEmpty')
+    ].filter(Boolean);
+
+    this.analysisProgressSections = [
+      document.getElementById('analyzeProgress'),
+      document.getElementById('analyzeProgressEmpty')
+    ].filter(Boolean);
+
+    // 空闲时按钮是否可用（取决于是否已加载音频）；运行中一律禁用
+    this.analyzeAvailable = false;
   }
 
   /**
-   * 显示加载状态
+   * 设置分析入口的基础可用状态（音频加载/移除时调用）。
+   * 实际禁用/启用仍由 syncAnalysisState 统一决定，运行中不会被提前启用。
+   */
+  setAnalyzeAvailable(available) {
+    this.analyzeAvailable = available;
+    this.syncAnalysisState(this.lastState || { status: ANALYSIS_STATUS.IDLE, progress: 0 }, this.lastOwned === true);
+  }
+
+  /**
+   * 显示加载状态（文件上传等非分析场景使用）
    * @param {string} message - 加载提示信息
    */
   showLoading(message = '加载中...') {
     if (this.loadingOverlay) {
-      const textElement = this.loadingOverlay.querySelector('p');
-      if (textElement) {
-        textElement.textContent = message;
+      if (this.loadingText) {
+        this.loadingText.textContent = message;
       }
+      this.setLoadingProgressVisible(false);
+      if (this.cancelAnalysisBtn) {
+        this.cancelAnalysisBtn.style.display = 'none';
+      }
+      this.overlayInAnalysisMode = false;
       this.loadingOverlay.style.display = 'flex';
     }
     logger.info('显示加载状态', { message });
   }
 
   /**
-   * 隐藏加载状态
+   * 隐藏加载状态。分析模式下的遮罩由分析状态机负责关闭，
+   * 避免重复提交时后一个调用提前关掉遮罩。
    */
   hideLoading() {
+    if (this.overlayInAnalysisMode) return;
+    this._hideOverlay();
+  }
+
+  _hideOverlay() {
     if (this.loadingOverlay) {
       this.loadingOverlay.style.display = 'none';
     }
-    logger.info('隐藏加载状态');
+    this.overlayInAnalysisMode = false;
+  }
+
+  /**
+   * 根据统一的分析状态同步全部相关 UI：
+   * 加载提示、遮罩进度条、整体进度条、两个入口按钮的启用/禁用与文案。
+   * @param {Object} state - AnalysisManager 的状态
+   */
+  syncAnalysisState(state, ownedLocally) {
+    this.lastState = state;
+    this.lastOwned = ownedLocally;
+    const running = state.status === ANALYSIS_STATUS.RUNNING;
+    const owned = running && ownedLocally;
+    const progress = Math.min(100, Math.max(0, state.progress || 0));
+
+    // 两个入口的按钮：运行中一律禁用；空闲时取决于是否已加载音频
+    this.analyzeButtons.forEach((button) => {
+      button.disabled = running || !this.analyzeAvailable;
+      const label = button.querySelector('.btn-label');
+      if (label) {
+        label.textContent = running ? '分析中...' : '分析音频';
+      }
+    });
+
+    // 两个入口的内联进度条：进度同步
+    this.analysisProgressSections.forEach((section) => {
+      section.style.display = running ? 'block' : 'none';
+    });
+    this.analysisProgressBars.forEach((bar) => {
+      bar.style.width = `${progress}%`;
+    });
+    this.analysisProgressTexts.forEach((text) => {
+      text.textContent = running ? `${Math.round(progress)}%` : '';
+    });
+
+    // 遮罩只有持有任务的标签页显示；其他标签页只镜像按钮与进度
+    if (running && owned) {
+      if (this.loadingOverlay) {
+        this.overlayInAnalysisMode = true;
+        if (this.loadingText) {
+          this.loadingText.textContent = state.message || '正在分析音频...';
+        }
+        this.setLoadingProgressVisible(true);
+        if (this.loadingProgressFill) {
+          this.loadingProgressFill.style.width = `${progress}%`;
+        }
+        if (this.loadingProgressText) {
+          this.loadingProgressText.textContent = `${Math.round(progress)}%`;
+        }
+        if (this.cancelAnalysisBtn) {
+          this.cancelAnalysisBtn.style.display = 'inline-flex';
+        }
+        this.loadingOverlay.style.display = 'flex';
+      }
+    } else if (this.overlayInAnalysisMode && state.status === ANALYSIS_STATUS.DONE) {
+      // 完成：进度条停在 100%，遮罩随状态机稍后自动关闭
+      if (this.loadingText) this.loadingText.textContent = state.message || '分析完成';
+      if (this.loadingProgressFill) this.loadingProgressFill.style.width = '100%';
+      if (this.loadingProgressText) this.loadingProgressText.textContent = '100%';
+      if (this.cancelAnalysisBtn) this.cancelAnalysisBtn.style.display = 'none';
+    } else if (this.overlayInAnalysisMode && (state.status === ANALYSIS_STATUS.ERROR || state.status === ANALYSIS_STATUS.CANCELLED)) {
+      // 失败 / 取消：显示最终提示，遮罩随状态机稍后自动关闭
+      if (this.loadingText) {
+        this.loadingText.textContent = state.status === ANALYSIS_STATUS.CANCELLED
+          ? '分析已取消'
+          : `分析失败${state.error ? '：' + state.error : ''}`;
+      }
+      this.setLoadingProgressVisible(false);
+      if (this.cancelAnalysisBtn) this.cancelAnalysisBtn.style.display = 'none';
+    } else if (this.overlayInAnalysisMode && (!running || !owned)) {
+      // 回到 idle，或任务转为其他标签页持有：收尾遮罩
+      this.setLoadingProgressVisible(false);
+      if (this.cancelAnalysisBtn) {
+        this.cancelAnalysisBtn.style.display = 'none';
+      }
+      this._hideOverlay();
+    }
+  }
+
+  setLoadingProgressVisible(visible) {
+    if (this.loadingProgress) {
+      this.loadingProgress.style.display = visible ? 'block' : 'none';
+    }
   }
 
   /**

@@ -15,22 +15,36 @@ export class AudioAnalyzer {
    * @param {Float32Array} audioData - 音频采样数据
    * @param {number} sampleRate - 采样率
    * @param {number} fftSize - FFT 大小
-   * @returns {Object} 分析结果
+   * @param {Function} [onProgress] - 进度回调 (progress: 0-100, message: string)
+   * @param {AbortSignal} [signal] - 取消信号
+   * @returns {Promise<Object>} 分析结果
    */
-  async analyze(audioData, sampleRate, fftSize = 8192) {
+  async analyze(audioData, sampleRate, fftSize = 8192, onProgress = () => {}, signal) {
+    const report = (progress, message) => {
+      this.checkAborted(signal);
+      onProgress(progress, message);
+    };
+    const yieldToUI = async (progress, message) => {
+      report(progress, message);
+      // 让出主线程，使加载提示与进度条可以真实刷新、取消可以被响应
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      this.checkAborted(signal);
+    };
+
     logger.info('开始频谱分析', { dataLength: audioData.length, sampleRate, fftSize });
 
+    await yieldToUI(5, '正在执行 FFT 频谱分析...');
     // 执行 FFT 分析
     const frequencyData = this.performFFT(audioData, fftSize);
-    
+
     // 计算频率分辨率
     const frequencyResolution = sampleRate / fftSize;
-    
+
     // 生成频率数组
     const frequencies = [];
     const magnitudes = [];
     const binCount = fftSize / 2;
-    
+
     for (let i = 0; i < binCount; i++) {
       const freq = i * frequencyResolution;
       if (freq > 20 && freq < 20000) { // 人耳可听范围
@@ -39,20 +53,32 @@ export class AudioAnalyzer {
       }
     }
 
+    await yieldToUI(30, '正在检测基频...');
     // 检测基频
-    const fundamentalFreq = this.detectFundamentalFrequency(audioData, sampleRate, frequencies, magnitudes);
-    
+    const fundamentalFreq = await this.detectFundamentalFrequency(
+      audioData, sampleRate, frequencies, magnitudes,
+      (p) => report(30 + p * 35, '正在检测基频...'), signal
+    );
+
+    await yieldToUI(70, '正在计算倍频...');
     // 计算倍频 (最大13倍)
     const harmonics = this.calculateHarmonics(fundamentalFreq, 13);
-    
+
+    report(74, '正在过滤谐波数据...');
     // 过滤只保留基频和倍频附近的数据
     const filteredData = this.filterHarmonics(frequencies, magnitudes, fundamentalFreq, harmonics);
-    
+
     // 计算频率区域数据
     const frequencyBands = this.calculateFrequencyBands(fundamentalFreq, harmonics, filteredData);
-    
+
+    await yieldToUI(80, '正在计算声强热力图...');
     // 计算声强随时间变化的热力图数据
-    const heatmapData = this.calculateHeatmapData(audioData, sampleRate, fftSize, fundamentalFreq, harmonics);
+    const heatmapData = await this.calculateHeatmapData(
+      audioData, sampleRate, fftSize, fundamentalFreq, harmonics,
+      (p) => report(80 + p * 18, '正在计算声强热力图...'), signal
+    );
+
+    report(99, '正在整理分析结果...');
 
     // 找出频率范围
     const minFreq = fundamentalFreq * 0.8;
@@ -149,59 +175,78 @@ export class AudioAnalyzer {
   }
 
   /**
+   * 如果任务已取消则抛出 AbortError
+   */
+  checkAborted(signal) {
+    if (signal?.aborted) {
+      throw new DOMException('分析已取消', 'AbortError');
+    }
+  }
+
+  /**
    * 检测基频 - 使用自相关法和峰值检测
    */
-  detectFundamentalFrequency(audioData, sampleRate, frequencies, magnitudes) {
+  async detectFundamentalFrequency(audioData, sampleRate, frequencies, magnitudes, onProgress, signal) {
     // 方法1: 自相关法
-    const autocorrFreq = this.autocorrelation(audioData, sampleRate);
-    
+    const autocorrFreq = await this.autocorrelation(audioData, sampleRate, onProgress, signal);
+
     // 方法2: 峰值检测法
     const peakFreq = this.findDominantPeak(frequencies, magnitudes);
-    
+
     // 综合判断 - 优先使用自相关法的结果，因为它对古琴这类乐器更准确
     let fundamentalFreq = autocorrFreq;
-    
+
     // 如果自相关法结果不合理，使用峰值检测
     if (fundamentalFreq < 50 || fundamentalFreq > 2000) {
       fundamentalFreq = peakFreq;
     }
-    
+
     // 验证：检查是否可能是倍频被误检为基频
     const possibleFundamental = this.verifyFundamental(fundamentalFreq, frequencies, magnitudes);
-    
+
     logger.info('基频检测结果', { autocorrFreq, peakFreq, final: possibleFundamental });
-    
+
     return possibleFundamental;
   }
 
   /**
-   * 自相关法检测基频
+   * 自相关法检测基频（长循环分片让出主线程，使进度可刷新、取消可响应）
    */
-  autocorrelation(audioData, sampleRate) {
+  async autocorrelation(audioData, sampleRate, onProgress = () => {}, signal) {
     const minPeriod = Math.floor(sampleRate / 2000); // 最高频率 2000Hz
     const maxPeriod = Math.floor(sampleRate / 50);   // 最低频率 50Hz
     const dataLength = Math.min(audioData.length, sampleRate); // 最多分析1秒
-    
+    const upperPeriod = Math.min(maxPeriod, Math.floor(dataLength / 2));
+
     let maxCorr = 0;
     let bestPeriod = minPeriod;
-    
-    for (let period = minPeriod; period < maxPeriod && period < dataLength / 2; period++) {
-      let corr = 0;
-      let count = 0;
-      
-      for (let i = 0; i < dataLength - period; i++) {
-        corr += audioData[i] * audioData[i + period];
-        count++;
+    let nextYield = 0;
+
+    for (let period = minPeriod; period < upperPeriod; period++) {
+      if (period >= nextYield) {
+        onProgress((period - minPeriod) / Math.max(1, upperPeriod - minPeriod));
+        // 每约 12ms 让出一次主线程
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        this.checkAborted(signal);
+        nextYield = period + 64;
       }
-      
+
+      let corr = 0;
+      const count = dataLength - period;
+
+      for (let i = 0; i < count; i++) {
+        corr += audioData[i] * audioData[i + period];
+      }
+
       corr /= count;
-      
+
       if (corr > maxCorr) {
         maxCorr = corr;
         bestPeriod = period;
       }
     }
-    
+
+    onProgress(1);
     return sampleRate / bestPeriod;
   }
 
@@ -231,29 +276,42 @@ export class AudioAnalyzer {
   verifyFundamental(freq, frequencies, magnitudes) {
     // 检查 freq/2, freq/3 等是否也有显著能量
     const possibleFundamentals = [freq, freq / 2, freq / 3];
-    
+    // 阈值只计算一次（原来在循环内重复计算，复杂度为 O(n²)）
+    const energyThreshold = 0.1 * this.maxMagnitude(magnitudes);
+
     for (const possibleFreq of possibleFundamentals) {
       if (possibleFreq < 50) continue;
-      
+
       // 检查该频率附近是否有能量
       const tolerance = possibleFreq * 0.05; // 5% 容差
       let hasEnergy = false;
-      
+
       for (let i = 0; i < frequencies.length; i++) {
         if (Math.abs(frequencies[i] - possibleFreq) < tolerance) {
-          if (magnitudes[i] > 0.1 * Math.max(...magnitudes)) {
+          if (magnitudes[i] > energyThreshold) {
             hasEnergy = true;
             break;
           }
         }
       }
-      
+
       if (hasEnergy && possibleFreq < freq) {
         return possibleFreq;
       }
     }
-    
+
     return freq;
+  }
+
+  /**
+   * 计算幅度数组中的最大值（避免对大数组使用展开运算符导致栈溢出）
+   */
+  maxMagnitude(magnitudes) {
+    let max = 0;
+    for (let i = 0; i < magnitudes.length; i++) {
+      if (magnitudes[i] > max) max = magnitudes[i];
+    }
+    return max;
   }
 
   /**
@@ -348,31 +406,33 @@ export class AudioAnalyzer {
   /**
    * 计算热力图数据 - 声强随时间变化
    */
-  calculateHeatmapData(audioData, sampleRate, fftSize, fundamentalFreq, harmonics) {
+  async calculateHeatmapData(audioData, sampleRate, fftSize, fundamentalFreq, harmonics, onProgress = () => {}, signal) {
     const allHarmonics = [fundamentalFreq, ...harmonics];
     const windowSize = Math.min(fftSize, 2048);
     const hopSize = windowSize / 4;
     const numFrames = Math.floor((audioData.length - windowSize) / hopSize) + 1;
-    
+
     // 限制帧数以提高性能
     const maxFrames = 100;
     const frameStep = Math.max(1, Math.floor(numFrames / maxFrames));
-    const actualFrames = Math.ceil(numFrames / frameStep);
-    
+
     const heatmapData = [];
     const timeLabels = [];
     const freqLabels = allHarmonics.map((h, i) => i === 0 ? '基频' : `${i + 1}倍频`);
-    
+
+    let processedFrames = 0;
+    const totalFrames = Math.ceil(numFrames / frameStep);
+
     for (let frame = 0; frame < numFrames; frame += frameStep) {
       const startSample = frame * hopSize;
       const endSample = startSample + windowSize;
-      
+
       if (endSample > audioData.length) break;
-      
+
       const frameData = audioData.slice(startSample, endSample);
       const fftResult = this.performFFT(frameData, windowSize);
       const freqResolution = sampleRate / windowSize;
-      
+
       // 提取每个谐波的能量
       const frameEnergies = allHarmonics.map(harmonic => {
         const binIndex = Math.round(harmonic / freqResolution);
@@ -381,9 +441,18 @@ export class AudioAnalyzer {
         }
         return 0;
       });
-      
+
       heatmapData.push(frameEnergies);
       timeLabels.push((startSample / sampleRate * 1000).toFixed(0));
+
+      processedFrames++;
+      onProgress(processedFrames / Math.max(1, totalFrames));
+      this.checkAborted(signal);
+      // 每处理若干帧让出一次主线程，保持进度条推进与取消响应
+      if (processedFrames % 8 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        this.checkAborted(signal);
+      }
     }
     
     // 归一化

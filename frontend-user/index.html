@@ -94,8 +94,14 @@
         <section class="panel-section">
           <button class="btn-analyze" id="analyzeBtn" disabled>
             <span class="btn-icon">📊</span>
-            分析音频
+            <span class="btn-label">分析音频</span>
           </button>
+          <div class="analyze-progress" id="analyzeProgress" style="display: none;">
+            <div class="analyze-progress-track">
+              <div class="analyze-progress-fill" id="analyzeProgressFill"></div>
+            </div>
+            <span class="analyze-progress-text" id="analyzeProgressText">0%</span>
+          </div>
         </section>
 
         <section class="panel-section" id="fundamentalInfo" style="display: none;">
@@ -220,6 +226,16 @@
               <span class="step-text">点击分析按钮</span>
             </div>
           </div>
+          <button class="btn-analyze btn-analyze-empty" id="analyzeBtnEmpty" disabled>
+            <span class="btn-icon">📊</span>
+            <span class="btn-label">分析音频</span>
+          </button>
+          <div class="analyze-progress analyze-progress-empty" id="analyzeProgressEmpty" style="display: none;">
+            <div class="analyze-progress-track">
+              <div class="analyze-progress-fill" id="analyzeProgressFillEmpty"></div>
+            </div>
+            <span class="analyze-progress-text" id="analyzeProgressTextEmpty">0%</span>
+          </div>
         </div>
       </div>
     </main>
@@ -232,6 +248,13 @@
   <div class="loading-overlay" id="loadingOverlay" style="display: none;">
     <div class="loading-spinner"></div>
     <p>正在分析音频...</p>
+    <div class="loading-progress" id="loadingProgress" style="display: none;">
+      <div class="loading-progress-track">
+        <div class="loading-progress-fill" id="loadingProgressFill"></div>
+      </div>
+      <span class="loading-progress-text" id="loadingProgressText">0%</span>
+    </div>
+    <button class="btn-cancel-analysis" id="cancelAnalysisBtn" style="display: none;">取消分析</button>
   </div>
 
   <div class="modal-overlay" id="recordDetailModal" style="display: none;">
